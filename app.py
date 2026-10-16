@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import time
 from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
@@ -79,69 +80,59 @@ st.markdown(
 # ==========================================
 def call_gemini_api(api_key: str, prompt: str, model_name: str = "gemini-3.8-flash") -> str:
     """
-    google-genai 최신 SDK를 우선 호출하고, 실패 시 google-generativeai로 fallback 처리합니다.
-    어떤 예외도 조용히 삼키지 않고 상세 원인을 반환합니다.
+    최신 google-genai SDK를 사용하여 1회 호출하고,
+    실패 시 2초 대기(time.sleep(2)) 후 단 1회만 재시도합니다.
+    503(서버 지연/과부하) 또는 429(호출 한도 초과) 발생 시 친절한 한글 안내 메시지를 반환합니다.
     """
     if not api_key:
         raise ValueError("Google Gemini API 키가 입력되지 않았습니다. 사이드바에서 API 키를 입력해 주세요.")
 
-    collected_errors = []
-
-    # 1. 최신 google-genai 라이브러리 시도
     try:
         from google import genai
+    except ImportError:
+        raise RuntimeError("google-genai 패키지가 설치되어 있지 않습니다. requirements.txt 설치를 확인해 주세요.")
 
-        client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key)
+
+    max_attempts = 2  # 최초 1회 + 실패 시 1회 재시도 (총 최대 2회)
+    last_exception = None
+
+    for attempt in range(1, max_attempts + 1):
         try:
-            response = client.models.generate_content(model=model_name, contents=prompt)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
             if response and response.text:
                 return response.text
             else:
-                collected_errors.append(f"google-genai ({model_name}): 빈 텍스트 응답이 반환되었습니다.")
+                raise ValueError("Gemini API로부터 빈 텍스트 응답이 반환되었습니다.")
+
         except Exception as e:
-            collected_errors.append(f"google-genai ({model_name}) 호출 실패: {type(e).__name__} - {str(e)}")
-            # 지정된 모델 호출 실패 시 gemini-3.8-flash로 재시도 (모델명이 다를 경우에만)
-            if model_name != "gemini-3.8-flash":
-                try:
-                    retry_res = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-                    if retry_res and retry_res.text:
-                        return retry_res.text
-                except Exception as retry_e:
-                    collected_errors.append(f"google-genai (gemini-3.8-flash 재시도) 실패: {type(retry_e).__name__} - {str(retry_e)}")
-    except ImportError:
-        collected_errors.append("google-genai 패키지가 미설치되어 있습니다.")
-    except Exception as e:
-        collected_errors.append(f"google-genai 클라이언트 초기화 실패: {type(e).__name__} - {str(e)}")
+            last_exception = e
+            err_msg = str(e)
 
-    # 2. 레거시 google.generativeai 라이브러리 시도
-    try:
-        import google.generativeai as legacy_genai
+            # 503(서버 과부하/지연) 또는 429(호출 한도 도달) 여부 판별
+            is_overloaded_or_rate_limited = any(
+                code in err_msg for code in ["503", "429", "ResourceExhausted", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "Overloaded"]
+            )
 
-        legacy_genai.configure(api_key=api_key)
-        try:
-            model = legacy_genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            if response and response.text:
-                return response.text
+            if is_overloaded_or_rate_limited:
+                # 429나 503 오류 발생 시 즉시 무차별 재시도를 중단하고 친절한 안내 메시지 반환
+                raise RuntimeError("일시적인 접속량 증가입니다. 약 30초~1분 뒤 다시 시도해 주세요.") from e
+
+            # 1회차 실패이고 일반 일시 오류인 경우 2초 대기 후 마지막 1회 재시도
+            if attempt < max_attempts:
+                time.sleep(2)
+                continue
             else:
-                collected_errors.append(f"google-generativeai ({model_name}): 빈 텍스트 응답이 반환되었습니다.")
-        except Exception as e:
-            collected_errors.append(f"google-generativeai ({model_name}) 호출 실패: {type(e).__name__} - {str(e)}")
-            if model_name != "gemini-3.8-flash":
-                try:
-                    retry_model = legacy_genai.GenerativeModel("gemini-3.8-flash")
-                    retry_res = retry_model.generate_content(prompt)
-                    if retry_res and retry_res.text:
-                        return retry_res.text
-                except Exception as retry_e:
-                    collected_errors.append(f"google-generativeai (gemini-3.8-flash 재시도) 실패: {type(retry_e).__name__} - {str(retry_e)}")
-    except ImportError:
-        collected_errors.append("google-generativeai 패키지가 미설치되어 있습니다.")
-    except Exception as e:
-        collected_errors.append(f"google-generativeai 클라이언트 초기화 실패: {type(e).__name__} - {str(e)}")
+                raise e
 
-    error_summary = "\n• " + "\n• ".join(collected_errors)
-    raise RuntimeError(f"Gemini API 호출에 모두 실패하였습니다. 상세 오류 내용:\n{error_summary}")
+    if last_exception:
+        err_msg = str(last_exception)
+        if any(code in err_msg for code in ["503", "429", "ResourceExhausted", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "Overloaded"]):
+            raise RuntimeError("일시적인 접속량 증가입니다. 약 30초~1분 뒤 다시 시도해 주세요.") from last_exception
+        raise last_exception
 
 
 def fetch_book_info_and_summary(api_key: str, book_title: str, model_name: str) -> Dict:
@@ -292,6 +283,7 @@ def generate_idea_sheet_content(
 {cleaned_result}
 """
         try:
+            time.sleep(1)  # 무료 티어 분당 호출 한도 보호를 위해 1초 대기 후 보강 요청
             refined = call_gemini_api(api_key, refine_prompt, model_name)
             if refined and refined.strip():
                 refined_clean = refined.strip()
@@ -299,7 +291,7 @@ def generate_idea_sheet_content(
                 if len(refined_lines) >= 15:
                     return refined_clean
         except Exception:
-            # refine 과정에서 실패하더라도 초안을 반환
+            # refine 과정에서 실패하더라도 생성된 초안을 안전하게 반환
             pass
 
     return cleaned_result
@@ -423,7 +415,9 @@ def generate_completed_pptx(
 # ==========================================
 # 4. Streamlit 세션 상태 초기화
 # ==========================================
-DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (1주차_대경생산팀_도서명).pptx"
+DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (0주차_소속부서_도서명).pptx"
+if not os.path.exists(DEFAULT_TEMPLATE_PATH):
+    DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (1주차_대경생산팀_도서명).pptx"
 
 if "book_info" not in st.session_state:
     st.session_state.book_info = None
