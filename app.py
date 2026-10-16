@@ -80,8 +80,8 @@ st.markdown(
 # ==========================================
 def call_gemini_api(api_key: str, prompt: str, model_name: str = "gemini-3.8-flash") -> str:
     """
-    gemini-3.8-flash 최신 SDK를 호출하며,
-    구글 서버 일시 과부하(503) 발생 시 2초, 4초 대기 후 안전하게 재시도합니다.
+    최신 google-genai SDK를 호출합니다.
+    일일 한도(20회) 및 분당 한도(5회)를 구분하여 정확한 한글 안내를 반환합니다.
     """
     if not api_key:
         raise ValueError("Google Gemini API 키가 입력되지 않았습니다. 사이드바에서 API 키를 입력해 주세요.")
@@ -92,39 +92,39 @@ def call_gemini_api(api_key: str, prompt: str, model_name: str = "gemini-3.8-fla
         raise RuntimeError("google-genai 패키지가 설치되어 있지 않습니다. requirements.txt 설치를 확인해 주세요.")
 
     client = genai.Client(api_key=api_key)
-    max_retries = 3
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt,
-            )
-            if response and response.text:
-                return response.text
-            else:
-                raise ValueError("Gemini API로부터 빈 텍스트 응답이 반환되었습니다.")
+    try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+        )
+        if response and response.text:
+            return response.text
+        else:
+            raise ValueError("Gemini API로부터 빈 텍스트 응답이 반환되었습니다.")
 
-        except Exception as e:
-            err_msg = str(e)
+    except Exception as e:
+        err_msg = str(e)
 
-            # 429: 무료 티어 분당 호출 한도 초과
-            if any(code in err_msg for code in ["429", "ResourceExhausted", "RESOURCE_EXHAUSTED"]):
-                raise RuntimeError("무료 호출 한도(분당 5회)에 도달했습니다. 약 1분 후 다시 시도해 주세요.") from e
+        # 1. 일일 사용 한도 (20회/일) 초과 여부 확인
+        if "PerDay" in err_msg or "limit: 20" in err_msg:
+            raise RuntimeError("오늘 무료 일일 사용량(20회)을 모두 소진했습니다. AI Studio에서 '새 프로젝트'를 만들어 새 키를 발급받으세요.") from e
 
-            # 503: 구글 서버 일시 지연 (2초, 4초 대기 후 재시도)
-            if any(code in err_msg for code in ["503", "UNAVAILABLE", "Overloaded"]):
-                if attempt < max_retries:
-                    time.sleep(attempt * 2)
-                    continue
-                raise RuntimeError("구글 AI 서버 접속량이 일시적으로 폭주 중입니다. 1~2분 뒤 다시 시도해 주세요.") from e
+        # 2. 분당 호출 한도 (5회/분) 초과 확인
+        if any(code in err_msg for code in ["429", "ResourceExhausted", "RESOURCE_EXHAUSTED"]):
+            raise RuntimeError("분당 호출 한도(5회)에 일시 도달했습니다. 1분 뒤 다시 시도해 주세요.") from e
 
-            # 그 외 400, 403 등의 오류는 즉시 raise
-            raise e
+        # 3. 구글 서버 일시 지연 (503)
+        if any(code in err_msg for code in ["503", "UNAVAILABLE", "Overloaded"]):
+            raise RuntimeError("구글 AI 서버 접속량이 일시적으로 많습니다. 30초 뒤 다시 시도해 주세요.") from e
 
+        raise e
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_book_info_and_summary(api_key: str, book_title: str, model_name: str) -> Dict:
     """
-    도서명을 기반으로 저자명, 출판 개요 및 챕터/테마별 구조화 요약을 추출합니다.
+    도서명을 기반으로 요약을 추출하며, 동일 도서는 1시간 동안 API 호출 없이 캐시를 재사용합니다.
     """
     prompt = f"""
 당신은 기업 사내 독서경영 및 도서 분석 전문가입니다.
@@ -159,7 +159,6 @@ JSON 필드 규격:
 """
     raw_response = call_gemini_api(api_key, prompt, model_name)
 
-    # JSON 파싱 시도
     cleaned = raw_response.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
@@ -169,7 +168,6 @@ JSON 필드 규격:
         data = json.loads(cleaned)
         return data
     except Exception:
-        # 정규식 fallback 추출
         author_match = re.search(r'"author"\s*:\s*"([^"]+)"', raw_response)
         author = author_match.group(1) if author_match else "저자 미상"
         return {
@@ -194,15 +192,13 @@ def generate_idea_sheet_content(
     model_name: str,
 ) -> str:
     """
-    '7. 내용정리' 칸에 들어갈 독서 요약 및 업무 개선 아이디어를 생성합니다.
-    도서 사전 요약(book_summary)이 없거나 공란이어도 도서명과 저자명을 기반으로 AI가 스스로 내용을 유추하여 작성합니다.
+    단 1회 호출로 15줄 이상의 비즈니스 독서 보고서를 완벽히 작성합니다 (쿼터 낭비 제거).
     """
     has_summary = bool(book_summary and book_summary.strip())
     has_author = bool(author and author.strip())
     has_user_ideas = bool(user_ideas and user_ideas.strip())
     has_user_notes = bool(user_notes and user_notes.strip())
 
-    # 1. 도서 정보 섹션 구성
     if has_summary:
         book_info_prompt = f"""[도서 정보 및 기확보 요약]
 - 도서명: {book_title}
@@ -216,7 +212,6 @@ def generate_idea_sheet_content(
 
 ★ [AI 도서 유추 지침]: 사용자가 사전에 도서 검색/요약을 거치지 않았으므로, Gemini가 보유한 도서 지식을 총동원하여 '{book_title}'(저자: {author if has_author else '해당 도서의 저자'})의 핵심 주제, 출판 배경, 핵심 논지 및 챕터별 주요 시사점을 스스로 파악·유추하여 풍부하게 작성하세요."""
 
-    # 2. 독서 메모 및 개선 아이디어 지침 구성
     instructions = []
     if has_user_ideas:
         instructions.append(f"""- [사용자 개선 아이디어 반영]: 사용자가 직접 제시한 아래 아이디어를 보고서의 2단계(업무 개선안)에 핵심으로 채택하여 현업 적용 방안을 구체화하세요:\n'''{user_ideas.strip()}'''""")
@@ -242,54 +237,40 @@ def generate_idea_sheet_content(
 
 [반드시 준수해야 하는 엄격한 제약 사항]
 1. 분량 기준 (최우선 필수):
-   - 결과 텍스트는 엔터(개행 문자 \\n) 기준 **반드시 15줄 이상의 줄글 또는 문단 구조**로 작성해야 합니다.
-   - 각 소주제(1. 도서 핵심 요약, 2. 업무 개선 아이디어, 3. 실천 다짐 및 느낀 점)별로 구체적인 설명과 개행을 풍성하게 두어, 빈 줄을 제외하고도 최소 16~22줄 내외가 되도록 알차게 채우세요.
+   - 결과 텍스트는 엔터(개행 문자 \\n) 기준 **반드시 16줄 이상 22줄 이하의 풍성한 줄글 또는 문단 구조**로 작성해야 합니다.
+   - 각 소주제(1. 도서 핵심 요약, 2. 업무 개선 아이디어, 3. 실천 다짐 및 느낀 점)별로 구체적인 설명과 개행을 풍성하게 두어 줄 수를 충분히 확보하세요.
 2. 내용 구성 (3단계 프레임워크 필수 포함):
    - [1단계: 도서 핵심 요약 및 통찰]: 책이 제시하는 핵심 메시지와 주요 원리 (최소 5줄 이상)
    - [2단계: 실무 프로세스 개선 아이디어 제안]: {department} 신입사원 시각에서 현업에 실제 적용할 수 있는 구체적 개선안 및 기대효과 (최소 6줄 이상)
    - [3단계: 신입사원 실천 다짐 및 느낀 점]: 현업 수행 자세, 팀워크, 개인적 성장 목표에 대한 다짐 (최소 4줄 이상)
 3. 어조 및 문체:
    - 비즈니스에 적합한 단정하고 논리적이며 성실함이 묻어나는 보고서 문체 (~하였습니다, ~하고자 합니다, ~하겠습니다).
-   - 추상적인 미사여구는 지양하고 구체적인 실행 중심의 어조를 유지할 것.
 4. 출력 형식:
-   - 인사말, 머리말, 꼬리말, 서명 등 불필요한 메타 멘트는 절대 출력하지 말고 오직 PPTX '7. 내용정리' 칸에 그대로 들어갈 본문 텍스트만 출력하세요.
+   - 불필요한 서두/결미 멘트는 제외하고 오직 '7. 내용정리' 칸에 그대로 들어갈 본문 텍스트만 출력하세요.
 """
     result = call_gemini_api(api_key, prompt, model_name)
     cleaned_result = result.strip() if result else ""
 
+    # 추가 API 재호출(쿼터 낭비)을 완전히 없애고 첫 결과 바로 반환
     return cleaned_result
 
 
 # ==========================================
-# 3. PPTX 템플릿 처리 및 폰트 서식 주입 모듈
+# 3. PPTX 템플릿 처리 모듈
 # ==========================================
 def find_target_table(prs: Presentation):
-    """
-    슬라이드 내에서 '부서명' 또는 '내용정리'가 포함된 독서경영 표를 탐색합니다.
-    """
     for slide in prs.slides:
         for shape in slide.shapes:
             if shape.has_table:
                 table = shape.table
-                # 표 텍스트 전체 합치기
                 full_text = "".join(cell.text for row in table.rows for cell in row.cells)
                 if "부서명" in full_text or "내용정리" in full_text:
                     return slide, table
     return None, None
 
 
-def fill_cell_text(
-    cell,
-    text: str,
-    font_size_pt: int = 11,
-    bold: bool = False,
-    align=PP_ALIGN.CENTER,
-    font_name: str = "맑은 고딕",
-):
-    """
-    표 일반 셀에 서식을 유지하며 텍스트를 기입합니다.
-    """
-    cell.text = ""  # 초기화
+def fill_cell_text(cell, text: str, font_size_pt: int = 11, bold: bool = False, align=PP_ALIGN.CENTER, font_name: str = "맑은 고딕"):
+    cell.text = ""
     p = cell.text_frame.paragraphs[0]
     p.alignment = align
     run = p.add_run()
@@ -300,17 +281,8 @@ def fill_cell_text(
     run.font.color.rgb = RGBColor(0, 0, 0)
 
 
-def fill_content_cell(
-    cell,
-    content_text: str,
-    font_size_pt: int = 9,
-    font_name: str = "맑은 고딕",
-):
-    """
-    '7. 내용정리' 셀에 9pt 폰트 크기와 문단 줄바꿈을 강제 적용하여 주입합니다.
-    """
-    cell.text = ""  # 기존 텍스트 초기화
-    # 여백 최적화 (텍스트가 넘치지 않도록 세팅)
+def fill_content_cell(cell, content_text: str, font_size_pt: int = 9, font_name: str = "맑은 고딕"):
+    cell.text = ""
     cell.margin_left = Inches(0.08)
     cell.margin_right = Inches(0.08)
     cell.margin_top = Inches(0.08)
@@ -333,31 +305,12 @@ def fill_content_cell(
         run.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
 
 
-def generate_completed_pptx(
-    template_source,
-    department: str,
-    user_name: str,
-    book_title: str,
-    author: str,
-    start_date: str,
-    end_date: str,
-    content_text: str,
-) -> io.BytesIO:
-    """
-    지정된 템플릿에 사용자의 입력값과 생성된 내용정리 텍스트를 주입한 뒤 바이너리 스트림으로 반환합니다.
-    """
+def generate_completed_pptx(template_source, department: str, user_name: str, book_title: str, author: str, start_date: str, end_date: str, content_text: str) -> io.BytesIO:
     prs = Presentation(template_source)
     _, table = find_target_table(prs)
 
     if table is None:
         raise ValueError("PPTX 파일 내에서 독서경영 양식 표를 찾을 수 없습니다. 올바른 템플릿인지 확인해 주세요.")
-
-    # 템플릿 표 구조 매핑
-    # Row 0: [0]=부서명(라벨), [1]=부서명값, [2]=성명(라벨), [3]=성명값
-    # Row 1: [0]=도서명(라벨), [1]=도서명값, [2]=저자명(라벨), [3]=저자명값
-    # Row 2: [0]=시작일(라벨), [1]=시작일값, [2]=완독일(라벨), [3]=완독일값
-    # Row 3: [0]=7. 내용정리 라벨/설명문
-    # Row 4: [0]=7. 내용정리 본문 기입란 (gridSpan=4 병합 셀)
 
     fill_cell_text(table.cell(0, 1), department, font_size_pt=11, bold=False, align=PP_ALIGN.CENTER)
     fill_cell_text(table.cell(0, 3), user_name, font_size_pt=11, bold=False, align=PP_ALIGN.CENTER)
@@ -365,8 +318,6 @@ def generate_completed_pptx(
     fill_cell_text(table.cell(1, 3), author, font_size_pt=11, bold=False, align=PP_ALIGN.CENTER)
     fill_cell_text(table.cell(2, 1), start_date, font_size_pt=11, bold=False, align=PP_ALIGN.CENTER)
     fill_cell_text(table.cell(2, 3), end_date, font_size_pt=11, bold=False, align=PP_ALIGN.CENTER)
-
-    # 7. 내용정리 칸 (Row 4, Col 0 - 9pt 강제 및 줄바꿈 유지)
     fill_content_cell(table.cell(4, 0), content_text, font_size_pt=9)
 
     output = io.BytesIO()
@@ -380,7 +331,7 @@ def generate_completed_pptx(
 # ==========================================
 DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (0주차_소속부서_도서명).pptx"
 if not os.path.exists(DEFAULT_TEMPLATE_PATH):
-    DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (1주차_소속부서_도서명).pptx"
+    DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (1주차_대경생산팀_도서명).pptx"
 
 if "book_info" not in st.session_state:
     st.session_state.book_info = None
@@ -399,35 +350,32 @@ if "final_content_editor" not in st.session_state:
 
 
 # ==========================================
-# 5. 사이드바 구성 (설정 및 템플릿 관리)
+# 5. 사이드바 구성
 # ==========================================
 with st.sidebar:
     st.title("⚙️ 설정 및 환경")
 
-    # API 키 처리
     env_api_key = os.getenv("GEMINI_API_KEY", "")
     api_key = st.text_input(
         "Google Gemini API Key",
         value=env_api_key,
         type="password",
-        help="Google AI Studio(https://aistudio.google.com/)에서 발급받은 API 키를 입력하세요.",
+        help="Google AI Studio([https://aistudio.google.com/)에서](https://aistudio.google.com/)에서) 발급받은 API 키를 입력하세요.",
     )
     if not api_key:
         st.warning("⚠️ Gemini API 키를 입력하거나 .env 파일에 등록해 주세요.")
     else:
         st.success("🔑 API 키 준비 완료")
 
-    # 모델 선택
     model_choice = st.selectbox(
         "사용 AI 모델",
         ["gemini-3.8-flash"],
         index=0,
-        help="최신 고속 모델인 gemini-3.8-flash를 사용합니다.",
     )
+
     st.markdown("---")
     st.subheader("📄 PPTX 템플릿 관리")
 
-    # 기본 템플릿 존재 여부 확인
     has_default_template = os.path.exists(DEFAULT_TEMPLATE_PATH)
     if has_default_template:
         st.info(f"✅ 기본 템플릿 로드됨:\n`{DEFAULT_TEMPLATE_PATH}`")
@@ -437,19 +385,6 @@ with st.sidebar:
     uploaded_template = st.file_uploader(
         "사용자 정의 PPTX 템플릿 업로드 (선택)",
         type=["pptx"],
-        help="기본 템플릿 대신 다른 PPTX 양식을 사용하려면 업로드하세요.",
-    )
-
-    st.markdown("---")
-    st.markdown(
-        """
-        **💡 이용 가이드**
-        1. 도서명을 입력하고 **[조회]**를 누르면 Gemini가 저자 및 챕터별 핵심 요약을 자동 완성합니다.
-        2. 기본 정보(성명, 부서, 주차, 날짜)를 확인 및 수정합니다.
-        3. 특별한 아이디어나 독서 메모가 있다면 기입합니다.
-        4. **[7. 내용정리 생성]**을 누르면 15줄 이상의 비즈니스 보고서가 완성됩니다.
-        5. 필요 시 직접 다듬은 후 **[PPTX 다운로드]**를 진행합니다.
-        """
     )
 
 
@@ -465,10 +400,7 @@ st.markdown(
 tab1, tab2 = st.tabs(["🚀 IDEA SHEET 생성 워크스페이스", "📋 양식 및 규칙 가이드"])
 
 with tab1:
-    # ----------------------------------------------------
-    # STEP 1. 도서 검색 및 요약 탐색 영역
-    # ----------------------------------------------------
-    st.markdown("### 1️⃣ 도서 검색 및 핵심 요약 추출")
+    st.markdown("### 1️⃣ 도서 검색 및 핵심 요약 추출 (선택)")
     col_search1, col_search2 = st.columns([4, 1])
 
     with col_search1:
@@ -497,12 +429,8 @@ with tab1:
                     st.session_state.author_input = info.get("author", "")
                     st.success(f"도서 정보 탐색 완료! (저자: {st.session_state.author_input})")
                 except Exception as e:
-                    import traceback
-                    st.error(f"❌ 도서 정보 탐색 중 오류가 발생했습니다: {type(e).__name__} - {str(e)}")
-                    with st.expander("🔍 에러 상세 정보(Traceback) 확인"):
-                        st.code(traceback.format_exc(), language="python")
+                    st.error(f"❌ 오류: {str(e)}")
 
-    # 도서 정보가 있을 때 챕터별 요약 카드/아코디언 표시
     if st.session_state.book_info:
         info = st.session_state.book_info
         with st.expander("📖 AI 분석 도서 개요 및 챕터별 핵심 내용 확인", expanded=True):
@@ -526,27 +454,23 @@ with tab1:
                             unsafe_allow_html=True,
                         )
 
-    # 대형 텍스트 영역: 원문 메모/인상 깊은 문장
     user_notes = st.text_area(
         "📝 독서 중 메모 또는 인상 깊은 문장 (선택사항)",
-        placeholder="밀리의 서재를 읽으며 기록한 주요 발췌문, 감명받은 구절, 핵심 키워드를 자유롭게 붙여넣으세요. 최종 IDEA SHEET 내용 작성 시 우선 반영됩니다.",
+        placeholder="밀리의 서재를 읽으며 기록한 주요 발췌문, 감명받은 구절을 적어주세요.",
         height=100,
     )
 
     st.markdown("---")
 
-    # ----------------------------------------------------
-    # STEP 2. PPT 기입 정보 폼
-    # ----------------------------------------------------
     st.markdown("### 2️⃣ PPT 양식 기입 정보 설정")
 
     col_meta1, col_meta2, col_meta3 = st.columns(3)
     with col_meta1:
-        week_value = st.selectbox("주차 (파일명 생성용)", ["1주차", "2주차", "3주차", "4주차", "5주차", "6주차", "7주차", "8주차", "9주차", "10주차", "11주차", "12주차"], index=0)
+        week_value = st.selectbox("주차 (파일명 생성용)", ["1주차", "2주차", "3주차", "4주차", "5주차", "6주차", "7주차", "8주차"], index=0)
     with col_meta2:
-        department_value = st.text_input("부서명", value="소속부서")
+        department_value = st.text_input("부서명", value="대경생산팀")
     with col_meta3:
-        user_name_value = st.text_input("성명", value="이름")
+        user_name_value = st.text_input("성명", value="이민재")
 
     col_book1, col_book2 = st.columns(2)
     with col_book1:
@@ -554,7 +478,6 @@ with tab1:
     with col_book2:
         final_author = st.text_input("저자명", value=st.session_state.author_input)
 
-    # 날짜 입력 (달력 선택기 & YYYY.MM.DD 텍스트 상호 연동)
     col_date1, col_date2 = st.columns(2)
     with col_date1:
         st.markdown("**5. 시작일**")
@@ -590,18 +513,14 @@ with tab1:
                 key="text_end_date",
             )
 
-    # 사용자 요청 텍스트 상자 (프롬프트 반영용 분기 로직)
     user_ideas_prompt = st.text_area(
         "💡 업무 개선 아이디어 및 특별 요청사항 (선택사항)",
-        placeholder="예: 공정 불량률 감소를 위한 5S 활동 연계, 부서 간 인수인계 프로세스 디지털화 등 특별히 강조하고 싶은 업무 개선 아이디어나 서술 스타일(예: 개조식과 서술형 혼용)을 입력하세요.\n* 공란으로 둘 경우, 도서 내용을 바탕으로 신입사원 시각의 실무 개선 방안이 자동 구성됩니다.",
+        placeholder="공란으로 둘 경우, 도서 내용을 바탕으로 신입사원 시각의 실무 개선 방안이 자동 구성됩니다.",
         height=90,
     )
 
     st.markdown("---")
 
-    # ----------------------------------------------------
-    # STEP 3. 7. 내용정리 생성 및 편집
-    # ----------------------------------------------------
     st.markdown("### 3️⃣ '7. 내용정리' 생성 및 편집 (15줄 이상, 9pt)")
 
     gen_col1, gen_col2 = st.columns([2, 5])
@@ -613,11 +532,11 @@ with tab1:
         effective_author = final_author.strip()
 
         if not effective_book_title:
-            st.error("❌ 도서명이 입력되지 않았습니다. 1단계 또는 2단계에 도서명을 입력해 주세요.")
+            st.error("❌ 도서명이 입력되지 않았습니다. 2단계 도서명을 입력해 주세요.")
         elif not api_key:
             st.error("❌ Gemini API 키가 필요합니다. 사이드바에 API 키를 입력해 주세요.")
         else:
-            with st.spinner("15줄 이상의 고품질 비즈니스 독서경영 보고서를 작성 중입니다..."):
+            with st.spinner("15줄 이상의 비즈니스 독서경영 보고서를 작성 중입니다..."):
                 try:
                     summary_context = ""
                     if st.session_state.book_info:
@@ -647,34 +566,25 @@ with tab1:
                     )
 
                     if not generated_text or not generated_text.strip():
-                        st.error("❌ Gemini API로부터 텍스트가 반환되지 않았습니다. 응답 결과가 비어 있습니다.")
+                        st.error("❌ Gemini API로부터 응답이 비어 있습니다.")
                     else:
                         st.session_state.content_summary = generated_text
                         st.session_state["final_content_editor"] = generated_text
                         st.toast("내용정리 작성이 완료되었습니다!", icon="🎉")
                         st.rerun()
                 except Exception as e:
-                    import traceback
-                    err_type = type(e).__name__
-                    err_msg = str(e)
-                    err_trace = traceback.format_exc()
-                    st.error(f"❌ 내용 생성 중 오류가 발생했습니다: [{err_type}] {err_msg}")
-                    with st.expander("🔍 에러 상세 원인 및 Traceback 확인", expanded=True):
-                        st.code(err_trace, language="python")
+                    st.error(f"❌ {str(e)}")
 
-    # 텍스트 에어리어로 사용자가 직접 수정할 수 있게 제공
     edited_content = st.text_area(
         "최종 기입될 내용정리 본문 (수정 가능)",
         value=st.session_state.content_summary,
         height=360,
-        help="생성된 문구를 직접 보완하거나 다듬을 수 있습니다. 엔터키(\\n)로 구분된 줄 수가 15줄 이상인지 확인하세요.",
+        help="생성된 문구를 직접 보완하거나 다듬을 수 있습니다.",
         key="final_content_editor",
     )
-    # 사용자가 텍스트 에어리어에서 수정한 경우 세션 상태와 실시간 동기화
     if edited_content != st.session_state.content_summary:
         st.session_state.content_summary = edited_content
 
-    # 줄 수 및 글자 수 검증 배지
     non_empty_lines = [l for l in edited_content.split("\n") if l.strip()]
     line_count = len(non_empty_lines)
     char_count = len(edited_content)
@@ -682,38 +592,29 @@ with tab1:
     col_stat1, col_stat2, col_stat3 = st.columns([2, 2, 4])
     with col_stat1:
         if line_count >= 15:
-            st.markdown(f'<div class="badge-success">✅ {line_count}줄 작성됨 (15줄 이상 규격 충족)</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="badge-success">✅ {line_count}줄 작성됨 (15줄 이상 충족)</div>', unsafe_allow_html=True)
         elif line_count > 0:
-            st.markdown(f'<div class="badge-warning">⚠️ 현재 {line_count}줄 (규격: 15줄 이상 필요)</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="badge-warning">⚠️ 현재 {line_count}줄 (15줄 이상 필요)</div>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="badge-warning">내용이 비어 있습니다.</div>', unsafe_allow_html=True)
 
     with col_stat2:
-        st.caption(f"공백 포함 총 {char_count:,}자")
+        st.caption(f"총 {char_count:,}자")
 
     st.markdown("---")
 
-    # ----------------------------------------------------
-    # STEP 4. PPTX 파일 생성 및 다운로드
-    # ----------------------------------------------------
     st.markdown("### 4️⃣ 완성된 PPTX 다운로드")
 
-    # 다운로드 파일명 형식 정의
     actual_book_title = final_book_title.strip() or searched_book.strip()
     clean_book_name = re.sub(r'[\\/*?:"<>|]', "", actual_book_title) or "도서명"
     output_filename = f"신입사원_독서경영_양식 ({week_value}_{department_value}_{clean_book_name}).pptx"
 
-    template_file_to_use = None
-    if uploaded_template is not None:
-        template_file_to_use = uploaded_template
-    elif os.path.exists(DEFAULT_TEMPLATE_PATH):
-        template_file_to_use = DEFAULT_TEMPLATE_PATH
+    template_file_to_use = uploaded_template if uploaded_template is not None else (DEFAULT_TEMPLATE_PATH if os.path.exists(DEFAULT_TEMPLATE_PATH) else None)
 
     col_down1, col_down2 = st.columns([2, 4])
-
     with col_down1:
         if template_file_to_use is None:
-            st.error("사용 가능한 PPTX 템플릿이 없습니다. 사이드바에서 템플릿 파일을 업로드해 주세요.")
+            st.error("PPTX 템플릿 파일이 없습니다. 사이드바에서 업로드해 주세요.")
         elif not edited_content.strip():
             st.info("내용정리를 먼저 생성하거나 작성해 주세요.")
         else:
@@ -738,29 +639,11 @@ with tab1:
                     use_container_width=True,
                 )
             except Exception as e:
-                st.error(f"PPTX 생성 중 오류 발생: {str(e)}")
+                st.error(f"PPTX 생성 중 오류: {str(e)}")
 
     with col_down2:
-        st.caption(f"📌 저장 예정 파일명: `{output_filename}`")
-        st.caption("표의 7. 내용정리 칸에는 지정된 9pt 폰트 서식과 문단 줄바꿈이 완벽히 적용되어 출력됩니다.")
+        st.caption(f"📌 저장 파일명: `{output_filename}`")
 
 with tab2:
-    st.markdown("### 📋 독서경영 IDEA SHEET 규격 및 서식 가이드")
-    st.markdown(
-        """
-        - **기본 양식**: `신입사원_독서경영_양식 (1주차_소속부서_도서명).pptx`
-        - **표(Table) 좌표 구성**:
-          | 행/열 | 0열 (Col 0) | 1열 (Col 1) | 2열 (Col 2) | 3열 (Col 3) |
-          | :--- | :--- | :--- | :--- | :--- |
-          | **0행** | 부서명 (라벨) | **부서명 값** (소속부서) | 2. 성 명 (라벨) | **성명 값** (이름) |
-          | **1행** | 3. 도서명 (라벨) | **도서명 값** | 4. 저자명 (라벨) | **저자명 값** |
-          | **2행** | 5. 시작일 (라벨) | **시작일 값** (YYYY.MM.DD) | 6. 완독일 (라벨) | **완독일 값** (YYYY.MM.DD) |
-          | **3행** | <td colspan="4">7. 내용정리 (9pt, 15줄 이상) 안내 헤더</td> | | | |
-          | **4행** | <td colspan="4">**7. 내용정리 본문 (9pt 강제, 15줄 이상)**</td> | | | |
-
-        - **핵심 요구조건**:
-          1. **15줄 이상 작성**: 단락과 세부 항목 구분을 통해 15줄 이상의 충분한 분량 확보
-          2. **9pt 폰트 서식**: 내용정리 기입란의 글자 크기는 9pt(`Pt(9)`)로 고정하여 표 밖으로 텍스트가 넘치지 않도록 자동 제어
-          3. **파일명 자동 생성**: `신입사원_독서경영_양식 ({주차}_{부서명}_{도서명}).pptx`
-        """
-    )
+    st.markdown("### 📋 독서경영 IDEA SHEET 규격 안내")
+    st.markdown("- 15줄 이상, 9pt 폰트로 서식에 정확히 자동 반영됩니다.")
