@@ -257,30 +257,6 @@ def generate_idea_sheet_content(
     result = call_gemini_api(api_key, prompt, model_name)
     cleaned_result = result.strip() if result else ""
 
-    # 줄 수 검증 (15줄 미만인 경우 문단 분할 및 보강)
-    lines = [line for line in cleaned_result.split("\n") if line.strip()]
-    if len(lines) < 15 and cleaned_result:
-        refine_prompt = f"""다음은 작성된 독서경영 내용정리 초안입니다.
-현재 총 {len(lines)}줄로 작성되어 사내 최소 규격(15줄 이상)에 미달합니다.
-
-내용을 더욱 심도 있고 구체화하여, 각 단락을 적절히 개행(\\n)하고 세부 실행 계획 및 기대효과를 보강하여
-**반드시 빈 줄을 제외하고도 16줄 이상 22줄 이하의 풍성한 줄글**로 다시 재작성해 주세요.
-
-[초안]
-{cleaned_result}
-"""
-        try:
-            time.sleep(1)  # 무료 티어 분당 호출 한도 보호를 위해 1초 대기 후 보강 요청
-            refined = call_gemini_api(api_key, refine_prompt, model_name)
-            if refined and refined.strip():
-                refined_clean = refined.strip()
-                refined_lines = [l for l in refined_clean.split("\n") if l.strip()]
-                if len(refined_lines) >= 15:
-                    return refined_clean
-        except Exception:
-            # refine 과정에서 실패하더라도 생성된 초안을 안전하게 반환
-            pass
-
     return cleaned_result
 
 
