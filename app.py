@@ -80,7 +80,8 @@ st.markdown(
 # ==========================================
 def call_gemini_api(api_key: str, prompt: str, model_name: str = "gemini-3.8-flash") -> str:
     """
-    구글 서버 503(과부하) 발생 시 대체 모델로 자동 우회(Fallback)하여 호출합니다.
+    gemini-3.8-flash 최신 SDK를 호출하며,
+    구글 서버 일시 과부하(503) 발생 시 2초, 4초 대기 후 안전하게 재시도합니다.
     """
     if not api_key:
         raise ValueError("Google Gemini API 키가 입력되지 않았습니다. 사이드바에서 API 키를 입력해 주세요.")
@@ -91,38 +92,35 @@ def call_gemini_api(api_key: str, prompt: str, model_name: str = "gemini-3.8-fla
         raise RuntimeError("google-genai 패키지가 설치되어 있지 않습니다. requirements.txt 설치를 확인해 주세요.")
 
     client = genai.Client(api_key=api_key)
+    max_retries = 3
 
-    # 503 발생 시 자동 우회할 예비 모델 지정
-    fallback_model = "gemini-3.8-pro" if "flash" in model_name else "gemini-3.8-flash"
-    candidate_models = [model_name, fallback_model]
-
-    last_exception = None
-
-    for current_model in candidate_models:
+    for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model=current_model,
+                model="gemini-3.8-flash",
                 contents=prompt,
             )
             if response and response.text:
                 return response.text
+            else:
+                raise ValueError("Gemini API로부터 빈 텍스트 응답이 반환되었습니다.")
+
         except Exception as e:
-            last_exception = e
             err_msg = str(e)
 
-            # 429(호출 한도 도달)는 모델을 바꿔도 동일하므로 1분 대기 안내
+            # 429: 무료 티어 분당 호출 한도 초과
             if any(code in err_msg for code in ["429", "ResourceExhausted", "RESOURCE_EXHAUSTED"]):
-                raise RuntimeError("무료 호출 한도(분당 5회)를 초과했습니다. 약 1분 후 다시 시도해 주세요.") from e
+                raise RuntimeError("무료 호출 한도(분당 5회)에 도달했습니다. 약 1분 후 다시 시도해 주세요.") from e
 
-            # 503(서버 과부하) 발생 시 다른 후보 모델로 넘어가서 재시도
+            # 503: 구글 서버 일시 지연 (2초, 4초 대기 후 재시도)
             if any(code in err_msg for code in ["503", "UNAVAILABLE", "Overloaded"]):
-                time.sleep(1)
-                continue
+                if attempt < max_retries:
+                    time.sleep(attempt * 2)
+                    continue
+                raise RuntimeError("구글 AI 서버 접속량이 일시적으로 폭주 중입니다. 1~2분 뒤 다시 시도해 주세요.") from e
 
+            # 그 외 400, 403 등의 오류는 즉시 raise
             raise e
-
-    if last_exception:
-        raise RuntimeError("현재 구글 AI 서버 접속량이 급증하여 응답이 지연되고 있습니다. 사이드바에서 모델을 변경하거나 잠시 후 다시 시도해 주세요.") from last_exception
 
 def fetch_book_info_and_summary(api_key: str, book_title: str, model_name: str) -> Dict:
     """
@@ -446,11 +444,10 @@ with st.sidebar:
     # 모델 선택
     model_choice = st.selectbox(
         "사용 AI 모델",
-        ["gemini-3.8-flash", "gemini-3.8-pro"],
+        ["gemini-3.8-flash"],
         index=0,
-        help="기본으로 flash 모델이 빠르며, 구글 서버 과부하(503) 발생 시 pro 모델로 변경해 보세요.",
+        help="최신 고속 모델인 gemini-3.8-flash를 사용합니다.",
     )
-
     st.markdown("---")
     st.subheader("📄 PPTX 템플릿 관리")
 
