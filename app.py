@@ -331,7 +331,7 @@ def generate_completed_pptx(template_source, department: str, user_name: str, bo
 # ==========================================
 DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (0주차_소속부서_도서명).pptx"
 if not os.path.exists(DEFAULT_TEMPLATE_PATH):
-    DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (1주차_대경생산팀_도서명).pptx"
+    DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (1주차_소속부서_도서명).pptx"
 
 if "book_info" not in st.session_state:
     st.session_state.book_info = None
@@ -468,9 +468,9 @@ with tab1:
     with col_meta1:
         week_value = st.selectbox("주차 (파일명 생성용)", ["1주차", "2주차", "3주차", "4주차", "5주차", "6주차", "7주차", "8주차"], index=0)
     with col_meta2:
-        department_value = st.text_input("부서명", value="대경생산팀")
+        department_value = st.text_input("부서명", value="소속부서")
     with col_meta3:
-        user_name_value = st.text_input("성명", value="이민재")
+        user_name_value = st.text_input("성명", value="이름")
 
     col_book1, col_book2 = st.columns(2)
     with col_book1:
