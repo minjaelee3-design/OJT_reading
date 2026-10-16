@@ -80,9 +80,7 @@ st.markdown(
 # ==========================================
 def call_gemini_api(api_key: str, prompt: str, model_name: str = "gemini-3.8-flash") -> str:
     """
-    최신 google-genai SDK를 사용하여 1회 호출하고,
-    실패 시 2초 대기(time.sleep(2)) 후 단 1회만 재시도합니다.
-    503(서버 지연/과부하) 또는 429(호출 한도 초과) 발생 시 친절한 한글 안내 메시지를 반환합니다.
+    구글 서버 503(과부하) 발생 시 대체 모델로 자동 우회(Fallback)하여 호출합니다.
     """
     if not api_key:
         raise ValueError("Google Gemini API 키가 입력되지 않았습니다. 사이드바에서 API 키를 입력해 주세요.")
@@ -94,46 +92,37 @@ def call_gemini_api(api_key: str, prompt: str, model_name: str = "gemini-3.8-fla
 
     client = genai.Client(api_key=api_key)
 
-    max_attempts = 2  # 최초 1회 + 실패 시 1회 재시도 (총 최대 2회)
+    # 503 발생 시 자동 우회할 예비 모델 지정
+    fallback_model = "gemini-3.8-pro" if "flash" in model_name else "gemini-3.8-flash"
+    candidate_models = [model_name, fallback_model]
+
     last_exception = None
 
-    for attempt in range(1, max_attempts + 1):
+    for current_model in candidate_models:
         try:
             response = client.models.generate_content(
-                model=model_name,
+                model=current_model,
                 contents=prompt,
             )
             if response and response.text:
                 return response.text
-            else:
-                raise ValueError("Gemini API로부터 빈 텍스트 응답이 반환되었습니다.")
-
         except Exception as e:
             last_exception = e
             err_msg = str(e)
 
-            # 503(서버 과부하/지연) 또는 429(호출 한도 도달) 여부 판별
-            is_overloaded_or_rate_limited = any(
-                code in err_msg for code in ["503", "429", "ResourceExhausted", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "Overloaded"]
-            )
+            # 429(호출 한도 도달)는 모델을 바꿔도 동일하므로 1분 대기 안내
+            if any(code in err_msg for code in ["429", "ResourceExhausted", "RESOURCE_EXHAUSTED"]):
+                raise RuntimeError("무료 호출 한도(분당 5회)를 초과했습니다. 약 1분 후 다시 시도해 주세요.") from e
 
-            if is_overloaded_or_rate_limited:
-                # 429나 503 오류 발생 시 즉시 무차별 재시도를 중단하고 친절한 안내 메시지 반환
-                raise RuntimeError("일시적인 접속량 증가입니다. 약 30초~1분 뒤 다시 시도해 주세요.") from e
-
-            # 1회차 실패이고 일반 일시 오류인 경우 2초 대기 후 마지막 1회 재시도
-            if attempt < max_attempts:
-                time.sleep(2)
+            # 503(서버 과부하) 발생 시 다른 후보 모델로 넘어가서 재시도
+            if any(code in err_msg for code in ["503", "UNAVAILABLE", "Overloaded"]):
+                time.sleep(1)
                 continue
-            else:
-                raise e
+
+            raise e
 
     if last_exception:
-        err_msg = str(last_exception)
-        if any(code in err_msg for code in ["503", "429", "ResourceExhausted", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "Overloaded"]):
-            raise RuntimeError("일시적인 접속량 증가입니다. 약 30초~1분 뒤 다시 시도해 주세요.") from last_exception
-        raise last_exception
-
+        raise RuntimeError("현재 구글 AI 서버 접속량이 급증하여 응답이 지연되고 있습니다. 사이드바에서 모델을 변경하거나 잠시 후 다시 시도해 주세요.") from last_exception
 
 def fetch_book_info_and_summary(api_key: str, book_title: str, model_name: str) -> Dict:
     """
@@ -457,9 +446,9 @@ with st.sidebar:
     # 모델 선택
     model_choice = st.selectbox(
         "사용 AI 모델",
-        ["gemini-3.8-flash"],
+        ["gemini-3.8-flash", "gemini-3.8-pro"],
         index=0,
-        help="기본으로 속도와 성능이 뛰어난 gemini-3.8-flash가 권장됩니다.",
+        help="기본으로 flash 모델이 빠르며, 구글 서버 과부하(503) 발생 시 pro 모델로 변경해 보세요.",
     )
 
     st.markdown("---")
