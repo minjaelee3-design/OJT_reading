@@ -417,7 +417,7 @@ def generate_completed_pptx(
 # ==========================================
 DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (0주차_소속부서_도서명).pptx"
 if not os.path.exists(DEFAULT_TEMPLATE_PATH):
-    DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (1주차_대경생산팀_도서명).pptx"
+    DEFAULT_TEMPLATE_PATH = "신입사원_독서경영_양식 (1주차_소속부서_도서명).pptx"
 
 if "book_info" not in st.session_state:
     st.session_state.book_info = None
@@ -580,11 +580,11 @@ with tab1:
 
     col_meta1, col_meta2, col_meta3 = st.columns(3)
     with col_meta1:
-        week_value = st.selectbox("주차 (파일명 생성용)", ["1주차", "2주차", "3주차", "4주차", "5주차", "6주차", "7주차", "8주차"], index=0)
+        week_value = st.selectbox("주차 (파일명 생성용)", ["1주차", "2주차", "3주차", "4주차", "5주차", "6주차", "7주차", "8주차", "9주차", "10주차", "11주차", "12주차"], index=0)
     with col_meta2:
-        department_value = st.text_input("부서명", value="대경생산팀")
+        department_value = st.text_input("부서명", value="소속부서")
     with col_meta3:
-        user_name_value = st.text_input("성명", value="이민재")
+        user_name_value = st.text_input("성명", value="이름")
 
     col_book1, col_book2 = st.columns(2)
     with col_book1:
@@ -786,11 +786,11 @@ with tab2:
     st.markdown("### 📋 독서경영 IDEA SHEET 규격 및 서식 가이드")
     st.markdown(
         """
-        - **기본 양식**: `신입사원_독서경영_양식 (1주차_대경생산팀_도서명).pptx`
+        - **기본 양식**: `신입사원_독서경영_양식 (1주차_소속부서_도서명).pptx`
         - **표(Table) 좌표 구성**:
           | 행/열 | 0열 (Col 0) | 1열 (Col 1) | 2열 (Col 2) | 3열 (Col 3) |
           | :--- | :--- | :--- | :--- | :--- |
-          | **0행** | 부서명 (라벨) | **부서명 값** (대경생산팀) | 2. 성 명 (라벨) | **성명 값** (이민재) |
+          | **0행** | 부서명 (라벨) | **부서명 값** (소속부서) | 2. 성 명 (라벨) | **성명 값** (이름) |
           | **1행** | 3. 도서명 (라벨) | **도서명 값** | 4. 저자명 (라벨) | **저자명 값** |
           | **2행** | 5. 시작일 (라벨) | **시작일 값** (YYYY.MM.DD) | 6. 완독일 (라벨) | **완독일 값** (YYYY.MM.DD) |
           | **3행** | <td colspan="4">7. 내용정리 (9pt, 15줄 이상) 안내 헤더</td> | | | |
